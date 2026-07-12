@@ -75,6 +75,70 @@ function computeIndicators(candles) {
   };
 }
 
+// ---------- Rule-based setup generator (tanpa AI, gratis) ----------
+function buildSetup(h1, h4) {
+  const trendUp4h = h4.ema20 > h4.ema50;
+  const momentumUp4h = h4.rsi14 !== null && h4.rsi14 > 50;
+  const macdUp4h = h4.macd.hist > 0;
+
+  const bullSignals = [trendUp4h, momentumUp4h, macdUp4h].filter(Boolean).length;
+  const bearSignals = 3 - bullSignals;
+
+  let bias = "netral";
+  let confidence = "rendah";
+  if (bullSignals >= 2) {
+    bias = "bullish";
+    confidence = bullSignals === 3 ? "tinggi" : "sedang";
+  } else if (bearSignals >= 2) {
+    bias = "bearish";
+    confidence = bearSignals === 3 ? "tinggi" : "sedang";
+  }
+
+  const price = h1.lastClose;
+  const atrRef = h1.atr14 || (h4.atr14 ? h4.atr14 / 2 : price * 0.003);
+
+  let entryLow, entryHigh, invalidasi, target;
+  if (bias === "bullish") {
+    entryLow = Math.min(price, h1.ema20) - atrRef * 0.3;
+    entryHigh = Math.max(price, h1.ema20) + atrRef * 0.2;
+    invalidasi = price - atrRef * 1.5;
+    target = price + atrRef * 3;
+  } else if (bias === "bearish") {
+    entryLow = Math.min(price, h1.ema20) - atrRef * 0.2;
+    entryHigh = Math.max(price, h1.ema20) + atrRef * 0.3;
+    invalidasi = price + atrRef * 1.5;
+    target = price - atrRef * 3;
+  } else {
+    entryLow = price - atrRef * 0.5;
+    entryHigh = price + atrRef * 0.5;
+    invalidasi = price - atrRef * 1.2;
+    target = price + atrRef * 1.2;
+  }
+
+  const ringkasanParts = [];
+  ringkasanParts.push(
+    trendUp4h ? "Trend 4H condong naik (EMA20 di atas EMA50)." : "Trend 4H condong turun (EMA20 di bawah EMA50)."
+  );
+  ringkasanParts.push(
+    momentumUp4h ? `RSI 4H di ${h4.rsi14?.toFixed(1)}, momentum masih di sisi beli.` : `RSI 4H di ${h4.rsi14?.toFixed(1)}, momentum condong ke sisi jual.`
+  );
+
+  const catatanRisiko =
+    bias === "netral"
+      ? "Sinyal antar-indikator belum searah, sebaiknya tunggu konfirmasi tambahan sebelum entry."
+      : "Gunakan position sizing wajar dan disiplin pada level invalidasi; kondisi pasar bisa berubah cepat.";
+
+  return {
+    bias,
+    confidence,
+    ringkasan: ringkasanParts.join(" "),
+    entry_area: `${entryLow.toFixed(2)} - ${entryHigh.toFixed(2)}`,
+    invalidasi: invalidasi.toFixed(2),
+    target: target.toFixed(2),
+    catatan_risiko: catatanRisiko,
+  };
+}
+
 // ---------- TwelveData fetch ----------
 async function fetchCandles(apiKey, interval) {
   const url = `https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=${interval}&outputsize=100&apikey=${apiKey}`;
@@ -94,16 +158,196 @@ async function fetchCandles(apiKey, interval) {
     .reverse();
 }
 
-// ---------- Claude call for narrative ----------
-async function getAnalysisNarrative(anthropicKey, h1, h4) {
-  const prompt = `Kamu adalah analis trading profesional untuk XAUUSD (emas). Berdasarkan data indikator teknikal berikut, berikan analisa singkat dan setup trading. Jawab HANYA dalam format JSON valid, tanpa markdown, tanpa penjelasan tambahan, dengan struktur persis:
-{
-  "bias": "bullish" | "bearish" | "netral",
-  "confidence": "tinggi" | "sedang" | "rendah",
-  "ringkasan": "1-2 kalimat kondisi pasar saat ini",
-  "entry_area": "range harga entry yang disarankan",
-  "invalidasi": "level harga stop loss / invalidasi setup",
-  "target": "level harga target/take profit",
+// ---------- UI ----------
+const biasColor = {
+  bullish: { fg: "#4ADE80", bg: "rgba(74,222,128,0.08)", border: "rgba(74,222,128,0.35)" },
+  bearish: { fg: "#F87171", bg: "rgba(248,113,113,0.08)", border: "rgba(248,113,113,0.35)" },
+  netral: { fg: "#94A3B8", bg: "rgba(148,163,184,0.08)", border: "rgba(148,163,184,0.35)" },
+};
+
+function Stat({ label, value, mono = true }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <span style={{ fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "#5B6478" }}>
+        {label}
+      </span>
+      <span style={{ fontSize: 14, fontFamily: mono ? "'IBM Plex Mono', monospace" : "inherit", color: "#DDE3F0" }}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+export default function App() {
+  const [apiKey, setApiKey] = useState("");
+  const [showKey, setShowKey] = useState(false);
+  const [status, setStatus] = useState("idle");
+  const [errorMsg, setErrorMsg] = useState("");
+  const [result, setResult] = useState(null);
+
+  const runAnalysis = useCallback(async () => {
+    if (!apiKey.trim()) {
+      setStatus("error");
+      setErrorMsg("Masukkan API key TwelveData dulu.");
+      return;
+    }
+    setStatus("loading");
+    setErrorMsg("");
+    try {
+      const [c1h, c4h] = await Promise.all([
+        fetchCandles(apiKey.trim(), "1h"),
+        fetchCandles(apiKey.trim(), "4h"),
+      ]);
+      const h1 = computeIndicators(c1h);
+      const h4 = computeIndicators(c4h);
+      const narrative = buildSetup(h1, h4);
+
+      setResult({ h1, h4, narrative, timestamp: new Date() });
+      setStatus("done");
+    } catch (err) {
+      setStatus("error");
+      setErrorMsg(err.message || "Terjadi kesalahan.");
+    }
+  }, [apiKey]);
+
+  const bias = result?.narrative?.bias || "netral";
+  const colors = biasColor[bias] || biasColor.netral;
+
+  return (
+    <div
+      style={{
+        minHeight: "100vh",
+        background: "#0B0D12",
+        color: "#DDE3F0",
+        fontFamily: "'Inter', 'Segoe UI', sans-serif",
+        padding: "32px 20px 60px",
+      }}
+    >
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap');
+        * { box-sizing: border-box; }
+        body { margin: 0; }
+        button:focus-visible, input:focus-visible { outline: 2px solid #C9A227; outline-offset: 2px; }
+        @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+        .pulse { animation: pulse 1.4s ease-in-out infinite; }
+        @keyframes pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
+        .fade-in { animation: fadeIn 0.5s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+      `}</style>
+
+      <div style={{ maxWidth: 640, margin: "0 auto" }}>
+        <div style={{ marginBottom: 28, display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+          <div>
+            <div style={{ fontSize: 11, letterSpacing: "0.18em", color: "#C9A227", textTransform: "uppercase", marginBottom: 4 }}>
+              Terminal Analisa
+            </div>
+            <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700, letterSpacing: "-0.01em" }}>
+              XAU/USD <span style={{ color: "#5B6478", fontWeight: 500 }}>· Intraday</span>
+            </h1>
+          </div>
+          <div style={{ textAlign: "right", fontSize: 11, color: "#5B6478" }}>
+            <div>1H &amp; 4H gabungan</div>
+            <div>via TwelveData</div>
+          </div>
+        </div>
+
+        <div style={{ background: "#12151C", border: "1px solid #1E2330", borderRadius: 10, padding: "14px 16px", marginBottom: 16 }}>
+          <label style={{ fontSize: 11, letterSpacing: "0.06em", color: "#5B6478", textTransform: "uppercase", display: "block", marginBottom: 8 }}>
+            API key TwelveData
+          </label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              type={showKey ? "text" : "password"}
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="Tempel API key TwelveData"
+              style={{ flex: 1, background: "#0B0D12", border: "1px solid #1E2330", borderRadius: 6, padding: "9px 10px", color: "#DDE3F0", fontFamily: "'IBM Plex Mono', monospace", fontSize: 13 }}
+            />
+            <button onClick={() => setShowKey((s) => !s)} style={{ background: "transparent", border: "1px solid #1E2330", borderRadius: 6, color: "#5B6478", fontSize: 12, padding: "0 12px", cursor: "pointer" }}>
+              {showKey ? "Sembunyikan" : "Lihat"}
+            </button>
+          </div>
+          <div style={{ fontSize: 11, color: "#454D5F", marginTop: 8, lineHeight: 1.5 }}>
+            Key hanya tersimpan di memori browser kamu selama sesi ini.
+          </div>
+        </div>
+
+        <button
+          onClick={runAnalysis}
+          disabled={status === "loading"}
+          style={{
+            width: "100%",
+            padding: "16px",
+            borderRadius: 10,
+            border: "none",
+            background: status === "loading" ? "#1E2330" : "linear-gradient(135deg, #C9A227, #A67F1E)",
+            color: status === "loading" ? "#5B6478" : "#0B0D12",
+            fontSize: 15,
+            fontWeight: 700,
+            letterSpacing: "0.02em",
+            cursor: status === "loading" ? "default" : "pointer",
+            marginBottom: 20,
+          }}
+        >
+          {status === "loading" ? <span className="pulse">Menganalisa kondisi market…</span> : "Analisa Sekarang"}
+        </button>
+
+        {status === "error" && (
+          <div className="fade-in" style={{ background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.3)", borderRadius: 8, padding: "12px 14px", color: "#F87171", fontSize: 13, marginBottom: 20 }}>
+            {errorMsg}
+          </div>
+        )}
+
+        {status === "done" && result && (
+          <div className="fade-in">
+            <div style={{ background: colors.bg, border: `1px solid ${colors.border}`, borderRadius: 12, padding: 20, marginBottom: 16 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <span style={{ fontSize: 12, letterSpacing: "0.08em", textTransform: "uppercase", color: "#5B6478" }}>
+                  Bias · Keyakinan {result.narrative.confidence}
+                </span>
+                <span style={{ fontSize: 11, color: "#454D5F" }}>{result.timestamp.toLocaleTimeString("id-ID")}</span>
+              </div>
+              <div style={{ fontSize: 28, fontWeight: 700, color: colors.fg, textTransform: "capitalize", marginBottom: 10 }}>{bias}</div>
+              <p style={{ margin: 0, fontSize: 14, lineHeight: 1.6, color: "#B8C0D4" }}>{result.narrative.ringkasan}</p>
+            </div>
+
+            <div style={{ background: "#12151C", border: "1px solid #1E2330", borderRadius: 12, padding: 20, marginBottom: 16, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+              <Stat label="Area Entry" value={result.narrative.entry_area} />
+              <Stat label="Invalidasi (SL)" value={result.narrative.invalidasi} />
+              <Stat label="Target (TP)" value={result.narrative.target} />
+              <Stat label="Harga Saat Ini" value={result.h1.lastClose.toFixed(2)} />
+            </div>
+
+            <div style={{ fontSize: 12.5, color: "#9A7B1F", background: "rgba(201,162,39,0.08)", border: "1px solid rgba(201,162,39,0.25)", borderRadius: 8, padding: "10px 14px", marginBottom: 20, lineHeight: 1.5 }}>
+              ⚠ {result.narrative.catatan_risiko}
+            </div>
+
+            <div style={{ fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "#5B6478", marginBottom: 10 }}>
+              Detail Indikator
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              {[{ label: "1 Jam", d: result.h1 }, { label: "4 Jam", d: result.h4 }].map(({ label, d }) => (
+                <div key={label} style={{ background: "#12151C", border: "1px solid #1E2330", borderRadius: 10, padding: 14 }}>
+                  <div style={{ fontSize: 12, color: "#C9A227", marginBottom: 10, fontWeight: 600 }}>{label}</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    <Stat label="RSI 14" value={d.rsi14?.toFixed(1) ?? "—"} />
+                    <Stat label="EMA20 / EMA50" value={`${d.ema20.toFixed(2)} / ${d.ema50.toFixed(2)}`} />
+                    <Stat label="MACD Hist" value={d.macd.hist.toFixed(3)} />
+                    <Stat label="ATR 14" value={d.atr14?.toFixed(2) ?? "—"} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div style={{ marginTop: 32, fontSize: 11, color: "#454D5F", lineHeight: 1.6, textAlign: "center" }}>
+          Bukan nasihat keuangan. Setup dihasilkan otomatis dari rumus indikator teknikal (EMA, RSI, MACD, ATR) — selalu lakukan verifikasi dan kelola risiko sendiri sebelum mengambil posisi.
+        </div>
+      </div>
+    </div>
+  );
+}  "target": "level harga target/take profit",
   "catatan_risiko": "1 kalimat peringatan risiko relevan"
 }
 
